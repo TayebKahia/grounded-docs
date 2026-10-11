@@ -177,11 +177,12 @@ Documents leave the server only as chunks sent to OpenAI for embedding and answe
 
 ## Roadmap
 
-- **v1.1.0: Observability and feedback.** Answer events without Question or Answer text, runtime cost per Answer, 👍/👎 feedback, Grafana dashboards and alerts, spending limits, scheduled evaluation runs, a load test.
-- **v1.2.0: Company sign-in and published images.** Google sign-in for the web page and status page, and versioned container images with an SBOM and provenance.
-- **v1.3.0: More providers, measured.** Claude and Gemini adapters, a model comparison on a new held-out set, and a prompt-injection evaluation category.
-- **v1.4.0: Multi-step questions.** An optional agentic mode for questions that need several lookups, with every Answer still verified.
-- **v1.5.0: Automation.** API keys for the ask endpoint and a documented workflow automation example.
+- **v1.1.0: Protect and measure.** Answer events without Question or Answer text, runtime cost per Answer, 👍/👎 feedback on Answers, rate limits for the web page and Slack, load shedding, a daily spending limit, a kill switch, and a load test.
+- **v1.2.0: See and evaluate.** Service-level objectives, Grafana dashboards and alerts, evaluation history, scheduled evaluation runs and a coverage report.
+- **v1.3.0: Company sign-in and published images.** Google sign-in for the web page and status page through an authenticating proxy, and versioned container images with an SBOM and provenance.
+- **v1.4.0: More providers, measured.** Claude and Gemini adapters, a model comparison on a new held-out set, optional provider failover, and a prompt-injection evaluation category.
+- **v1.5.0: Multi-step questions.** An optional agentic mode for questions that need several lookups, with every Answer still verified.
+- **v1.6.0: Automation.** API keys for the ask endpoint and a documented workflow automation example.
 - **v2.0.0: Permission-aware retrieval.** Each person gets Answers only from the Documents they can open in Drive.
 
 ## Code access
