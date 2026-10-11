@@ -13,7 +13,7 @@ Point it at a Google Drive folder (or a local folder) of PDFs, Word files and Go
 
 ## 🎥 Demo video
 
-<!-- VIDEO: the user-attachments URL of grounded-docs-demo-readme.mp4, uploaded through this repository's issue box -->
+https://github.com/user-attachments/assets/8d620a68-81fa-44bc-85c3-38df31d3c225
 
 Six and a half minutes, on a real Google Drive folder of about fifty documents: latest-version answers with checked Citations, Slack with a Follow-up, a Conflict, a Partial Answer, an unreadable file, a live edit and a deletion picked up by Sync, and a question the documents don't cover.
 
