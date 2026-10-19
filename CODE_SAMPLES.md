@@ -78,7 +78,7 @@ def is_conflict(claims: list[Claim]) -> bool:
 
 ## 3. A hedged model call against tail latency
 
-Most answers take about 3 seconds, but a provider sometimes stalls on one request. If the answer call hasn't returned after 5 seconds, an identical second call starts and the first success wins. At most two calls are in flight; the loser is abandoned. The `Runner` is a small port, so the tests drive this on a scripted timeline instead of real threads and sleeps.
+Most answers take about 3 seconds, but a provider sometimes stalls on one request. If the answer call hasn't returned after 5 seconds, an identical second call starts and the first success wins. At most two calls are in flight; the loser is abandoned. Which call won is reported to the request that made it, for its answer event. The `Runner` is a small port, so the tests drive this on a scripted timeline instead of real threads and sleeps.
 
 ```python
     def answer(self, standalone_question: str, chunks: list[ShownChunk]) -> DraftAnswer:
@@ -101,9 +101,11 @@ Most answers take about 3 seconds, but a provider sometimes stalls on one reques
                 failure = future.exception()
                 if failure is None:
                     self._abandon(calls)
+                    _report(winner)
                     self._log(winner, started)
                     return future.result()
                 first_failure = first_failure or failure
+        _report("none")
         self._log("none", started)
         assert first_failure is not None  # both calls finished, and neither succeeded
         raise first_failure

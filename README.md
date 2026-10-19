@@ -1,7 +1,7 @@
 # Grounded Docs
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](#engineering)
-[![Tests](https://img.shields.io/badge/tests-777-brightgreen.svg)](#engineering)
+[![Tests](https://img.shields.io/badge/tests-1038-brightgreen.svg)](#engineering)
 [![Invented answers (held-out)](https://img.shields.io/badge/invented%20answers%20(held--out)-0-brightgreen.svg)](#evaluation)
 [![Source](https://img.shields.io/badge/source-private%2C%20access%20on%20request-lightgrey.svg)](#code-access)
 
@@ -9,13 +9,19 @@ A private document assistant for small teams: ask in plain language, get answers
 
 Point it at a Google Drive folder (or a local folder) of PDFs, Word files and Google Docs. Ask on a single web page or in Slack. Every claim in an Answer carries a verbatim Excerpt that the code has checked word for word against the source, and a link that opens the file. When the documents don't say, it says so instead of guessing.
 
-> **About this repository.** This is the public showcase of Grounded Docs 1.0.0: what it does, how it is built, how it was measured, and samples of its code. The source code, tests and deployment files live in a private repository. See [Code access](#code-access).
+> **About this repository.** This is the public showcase of Grounded Docs 1.1.0: what it does, how it is built, how it was measured, and samples of its code. The source code, tests and deployment files live in a private repository. See [Code access](#code-access).
 
 ## 🎥 Demo video
 
 https://github.com/user-attachments/assets/8d620a68-81fa-44bc-85c3-38df31d3c225
 
 Six and a half minutes, on a real Google Drive folder of about fifty documents: latest-version answers with checked Citations, Slack with a Follow-up, a Conflict, a Partial Answer, an unreadable file, a live edit and a deletion picked up by Sync, and a question the documents don't cover.
+
+### v1.1.0: protected and measured (2 min)
+
+https://github.com/user-attachments/assets/af913147-21be-4877-83a1-0e5653baf82a
+
+The kill switch, a daily-budget refusal, a 👎 that keeps its review text, the answer event behind every request, and the status page's Protection section.
 
 ## What it does
 
@@ -27,6 +33,7 @@ Six and a half minutes, on a real Google Drive folder of about fifty documents: 
 - **Web page and Slack.** Mention the bot in a channel or send it a direct message; it answers in a thread with the same Citations. Follow-ups work in the thread.
 - **Follow-ups without server-side history.** The Session lives in the browser tab or the Slack thread. The server stores no conversation.
 - **Exact codes and IDs.** Searching for `LQA-MSA-2025-014` finds that contract, not its sibling `LQA-MSA-2025-031`. Hybrid search fuses keyword and vector ranking, and every code is indexed as one whole term.
+- **Protected and measured in production.** Every Question passes one Gatekeeper: rate limits per person, a kill switch, a daily spending limit and a cap on Questions in flight, all changed live with one command and no restart. Every request is recorded as an answer event (timings, tokens, cost, versions; never any Question or Answer text), and people rate Answers with 👍/👎.
 - **Cheap to run.** $0.62 per 1,000 Questions on the measured held-out set, on one small server with Docker Compose.
 
 ## Screenshots
@@ -44,6 +51,13 @@ Six and a half minutes, on a real Google Drive folder of about fifty documents: 
 **Slack:** the same Answer in a thread, and a Follow-up ("How is it paid?") understood from the thread.
 
 ![Slack thread with a follow-up](screenshots/slack-thread.png)
+
+**Protection (v1.1.0).** The operator turns answering off, or a spent daily budget refuses the next Question before any model call; the status page says why and counts every refusal; each request leaves one answer event with its timing, tokens and cost, and no text.
+
+| | |
+| --- | --- |
+| **Kill switch.** One command; within 5 s every Question gets the operator's message. ![Kill switch message](screenshots/kill-switch.png) | **Daily budget spent.** Refused at once, until 00:00 UTC. ![Budget refusal](screenshots/budget-refused.png) |
+| **Status page, Protection.** Today's spend against the budget, refusals by reason, Questions in flight. ![Status page Protection section](screenshots/protection-status.png) | **One answer event per request.** Outcome, timing, tokens, cost and model; never the Question or the Answer. ![An answer event row](screenshots/answer-event.png) |
 
 ## Architecture
 
@@ -67,9 +81,13 @@ flowchart LR
     end
     DB["Postgres + pgvector + full-text"]
 
-    WEB -->|"POST /api/ask"| API
-    API --> ASSIST
-    SLACK -->|"in-process call"| ASSIST
+    GATE["Gatekeeper: rate limits, kill switch, budget, cap"]
+
+    WEB -->|"POST /api/ask, /api/feedback"| API
+    API --> GATE
+    SLACK -->|"in-process call"| GATE
+    GATE --> ASSIST
+    GATE -->|"one answer event per request"| DB
     EVAL --> ASSIST
     ASSIST -->|"rewrite, answer"| LM
     ASSIST -->|"embed question"| EMB
@@ -101,7 +119,7 @@ flowchart TD
     P --> A["Answer"]
 ```
 
-Every external system (OpenAI, Google Drive, Slack, the file system) sits behind a port with a fake for tests, so the Assistant and Sync are tested end to end against a real Postgres without network calls. [ARCHITECTURE.md](ARCHITECTURE.md) covers the modules, Sync, storage and failure modes in depth, with the reasoning behind each choice. [CODE_SAMPLES.md](CODE_SAMPLES.md) shows the code that enforces grounding, and the tests that pin it down.
+Every external system (OpenAI, Google Drive, Slack, the file system) sits behind a port with a fake for tests, so the Assistant and Sync are tested end to end against a real Postgres without network calls. [ARCHITECTURE.md](ARCHITECTURE.md) covers the modules, Sync, protection and measurement, storage and failure modes in depth, with the reasoning behind each choice. [CODE_SAMPLES.md](CODE_SAMPLES.md) shows the code that enforces grounding, and the tests that pin it down.
 
 ## Evaluation
 
@@ -164,20 +182,25 @@ What closed the gaps: claims that only say "the documents do not mention…" rem
 | | |
 | --- | --- |
 | **Stack** | Python 3.12, FastAPI, Pydantic, Postgres 17 with pgvector and full-text search, psycopg 3, Slack Bolt (Socket Mode), Docker Compose |
-| **Design** | Two deep modules (`Assistant.ask`, `Sync.run_once`) behind small interfaces; every external system behind a port (`typing.Protocol`) with a fake |
-| **Tests** | 777 tests: unit tests, adapter contract tests against recorded responses, and integration tests end to end against a real Postgres with pgvector |
+| **Design** | Three deep modules (`Assistant.ask`, `Sync.run_once`, `Gatekeeper.ask`) behind small interfaces; every external system behind a port (`typing.Protocol`) with a fake |
+| **Tests** | 1,038 tests (1,037 run; one live-API test needs a key): unit tests, adapter contract tests against recorded responses, and integration tests end to end against a real Postgres with pgvector |
 | **Quality gates** | ruff lint and format, strict mypy, the full test suite, on every push and in a pre-commit hook |
 | **CI** | Two jobs: the gates against a Postgres service, and a Docker Compose smoke test from a clean checkout with no provider keys. Every action pinned to a commit SHA |
 | **Operations** | A status page, structured JSON logs (no Question or Answer text by default), non-root containers, services that pause with a reason instead of restart-looping, and an operator runbook (start, update, back up, re-index, rotate keys) |
+| **Protection** | One Gatekeeper for the web page and Slack, in order: rate limits per person (token bucket per minute, count per day), operator controls (kill switch, daily budget from the events' cost), the provider check, a slot under the concurrency cap. A refused Question makes no model call, gets a clear message (429 or 503 with `Retry-After` where it applies) and is recorded with its reason |
+| **Measurement** | One answer event per request, written off the request's path through a bounded queue: Outcome or refusal reason, stage timings, tokens, cost as billed (hedged and abandoned calls included), prompt and model versions. A failed write never fails an Answer |
+| **Load test** | k6 over fake providers replaying recorded answer-call times, 1 to 32 Questions at once: p95 stayed under 8 s at every step (5.15 s at 16), so the cap defaults to 16. Real providers, 4 at once: 50 of 50 answered, p95 5.86 s, $0.021 in all |
 | **Failure handling** | Timeouts and bounded retries with jitter on every provider call, a hedged answer call for tail latency, a 25 s overall budget, and never a fallback Answer: a failure is reported as a failure |
 
 ## Privacy
 
-Documents leave the server only as chunks sent to OpenAI for embedding and answering, through the API (no training on API data by default; answering is sent with `store: false`). The index, the files and the Sync state stay in your own Postgres. The server keeps no conversation history, and by default logs no Question or Answer text. Real documents need a paid API tier whose terms exclude training on inputs.
+Documents leave the server only as chunks sent to OpenAI for embedding and answering, through the API (no training on API data by default; answering is sent with `store: false`). The index, the files and the Sync state stay in your own Postgres. The server keeps no conversation history, and by default logs and stores no Question or Answer text. Answer events hold counts, timings and cost only, with no person and no IP address, and are deleted after 400 days; votes carry no IP address. Review text for a 👎 is off by default: when an operator turns it on, the Question and the Answer of a 👎 are kept 30 days for review, then deleted. Real documents need a paid API tier whose terms exclude training on inputs.
 
 ## Roadmap
 
-- **v1.1.0: Protect and measure.** Answer events without Question or Answer text, runtime cost per Answer, 👍/👎 feedback on Answers, rate limits for the web page and Slack, load shedding, a daily spending limit, a kill switch, and a load test.
+The releases after v1.0.0, in order (✅: done):
+
+- ✅ **v1.1.0: Protect and measure.** Answer events without Question or Answer text, runtime cost per Answer, 👍/👎 feedback on Answers, rate limits for the web page and Slack, load shedding, a daily spending limit, a kill switch, and a load test.
 - **v1.2.0: See and evaluate.** Service-level objectives, Grafana dashboards and alerts, evaluation history, scheduled evaluation runs and a coverage report.
 - **v1.3.0: Company sign-in and published images.** Google sign-in for the web page and status page through an authenticating proxy, and versioned container images with an SBOM and provenance.
 - **v1.4.0: More providers, measured.** Claude and Gemini adapters, a model comparison on a new held-out set, optional provider failover, and a prompt-injection evaluation category.
