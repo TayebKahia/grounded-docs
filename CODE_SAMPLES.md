@@ -1,6 +1,6 @@
 # Code samples
 
-Excerpts from the private Grounded Docs repository (version 1.0.0), copied as they are, apart from a reference to an internal design record removed from one docstring. They show the part of the system that matters most: an Answer may only say what the documents say.
+Excerpts from the private Grounded Docs repository (version 1.1.0), copied as they are, apart from a reference to an internal design record removed from one docstring; `# …` marks code left out between two parts of one file. They show the part of the system that matters most: an Answer may only say what the documents say.
 
 ## 1. Every Excerpt is checked word for word
 
@@ -26,6 +26,8 @@ def normalise(text: str) -> str:
 
 ```python
 MIN_EXCERPT_CHARS = 20  # counted after normalisation
+
+# …
 
 
 def _verify(draft_claim: DraftClaim, shown: list[SearchHit]) -> Claim | None:
