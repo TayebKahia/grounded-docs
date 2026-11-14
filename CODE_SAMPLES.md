@@ -1,6 +1,6 @@
 # Code samples
 
-Excerpts from the private Grounded Docs repository (version 1.1.0), copied as they are, apart from a reference to an internal design record removed from one docstring; `# …` marks code left out between two parts of one file. They show the part of the system that matters most: an Answer may only say what the documents say.
+Excerpts from the private Grounded Docs repository (version 1.2.0), copied as they are, apart from a reference to an internal design record removed from one docstring; `# …` marks code left out between two parts of one file. Sections 1 to 4 show the part of the system that matters most: an Answer may only say what the documents say. Section 5 shows where "working" is defined.
 
 ## 1. Every Excerpt is checked word for word
 
@@ -176,3 +176,43 @@ def test_excerpts_match_despite_typographic_quotes_dashes_and_spacing(index: Ind
 ```
 
 `_draft`, `_claim` and `_ref_of` are small test helpers: build the model's draft, build a claim citing a chunk, and find the number of the shown chunk containing a sentence.
+
+## 5. The SLOs, written once
+
+Every target, window and threshold that the dashboards and alerts use lives in one TOML file, typed by a Pydantic model that validates the durations and the SQL conditions. A build script renders from it the SQL, both Grafana dashboards and every alert rule; all are committed, and a test fails when any of them is stale. Here, the rolling window, the two burn-rate alert pairs, and the two ratio SLOs whose `valid` and `good` conditions decide what counts against the error budget.
+
+```toml
+window = "28 days"
+
+# …
+
+[burn.fast]
+long = "1 hour"
+short = "5 minutes"
+factor = 14.4
+min_valid = 20
+severity = "page"
+
+[burn.slow]
+long = "6 hours"
+short = "30 minutes"
+factor = 6
+min_valid = 20
+severity = "ticket"
+
+# `valid` and `good` are SQL conditions on one `answer_events` row.
+[slo.availability]
+kind = "ratio"
+title = "Availability"
+target = 0.99
+# Refusals by policy (rate_limited, answering_off, budget_exhausted) are not faults.
+valid = "status IN ('answered', 'failed') OR (status = 'refused' AND reason = 'overloaded')"
+good = "status = 'answered'"
+
+[slo.latency]
+kind = "ratio"
+title = "Latency"
+target = 0.95
+valid = "status = 'answered'"
+good = "duration_ms <= 8000"
+```

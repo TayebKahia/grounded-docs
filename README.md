@@ -1,7 +1,7 @@
 # Grounded Docs
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](#engineering)
-[![Tests](https://img.shields.io/badge/tests-1038-brightgreen.svg)](#engineering)
+[![Tests](https://img.shields.io/badge/tests-1381-brightgreen.svg)](#engineering)
 [![Invented answers (held-out)](https://img.shields.io/badge/invented%20answers%20(held--out)-0-brightgreen.svg)](#evaluation)
 [![Source](https://img.shields.io/badge/source-private%2C%20access%20on%20request-lightgrey.svg)](#code-access)
 
@@ -9,7 +9,7 @@ A private document assistant for small teams: ask in plain language, get answers
 
 Point it at a Google Drive folder (or a local folder) of PDFs, Word files and Google Docs. Ask on a single web page or in Slack. Every claim in an Answer carries a verbatim Excerpt that the code has checked word for word against the source, and a link that opens the file. When the documents don't say, it says so instead of guessing.
 
-> **About this repository.** This is the public showcase of Grounded Docs 1.1.0: what it does, how it is built, how it was measured, and samples of its code. The source code, tests and deployment files live in a private repository. See [Code access](#code-access).
+> **About this repository.** This is the public showcase of Grounded Docs 1.2.0: what it does, how it is built, how it was measured, and samples of its code. The source code, tests and deployment files live in a private repository. See [Code access](#code-access).
 
 ## 🎥 Demo video
 
@@ -34,6 +34,7 @@ The kill switch, a daily-budget refusal, a 👎 that keeps its review text, the 
 - **Follow-ups without server-side history.** The Session lives in the browser tab or the Slack thread. The server stores no conversation.
 - **Exact codes and IDs.** Searching for `LQA-MSA-2025-014` finds that contract, not its sibling `LQA-MSA-2025-031`. Hybrid search fuses keyword and vector ranking, and every code is indexed as one whole term.
 - **Protected and measured in production.** Every Question passes one Gatekeeper: rate limits per person, a kill switch, a daily spending limit and a cap on Questions in flight, all changed live with one command and no restart. Every request is recorded as an answer event (timings, tokens, cost, versions; never any Question or Answer text), and people rate Answers with 👍/👎.
+- **Seen and evaluated.** Four service-level objectives (availability, latency, freshness, cost), written down once and turned into two Grafana dashboards and burn-rate alerts that reach Slack. Every evaluation run is kept in the database and plotted over time, a report-only evaluation runs weekly in CI, and optional synthetic traffic keeps a quiet deployment's dashboards from going blank. Grafana reads through a database role that cannot see any Question, Answer or Document text.
 - **Cheap to run.** $0.62 per 1,000 Questions on the measured held-out set, on one small server with Docker Compose.
 
 ## Screenshots
@@ -58,6 +59,20 @@ The kill switch, a daily-budget refusal, a 👎 that keeps its review text, the 
 | --- | --- |
 | **Kill switch.** One command; within 5 s every Question gets the operator's message. ![Kill switch message](screenshots/kill-switch.png) | **Daily budget spent.** Refused at once, until 00:00 UTC. ![Budget refusal](screenshots/budget-refused.png) |
 | **Status page, Protection.** Today's spend against the budget, refusals by reason, Questions in flight. ![Status page Protection section](screenshots/protection-status.png) | **One answer event per request.** Outcome, timing, tokens, cost and model; never the Question or the Answer. ![An answer event row](screenshots/answer-event.png) |
+
+**Seeing and evaluating (v1.2.0).** Two Grafana dashboards and the alerts are generated from one file of service-level objectives; Grafana reads through a role that cannot see any text.
+
+**Operations:** the four SLOs with their 28-day compliance and error budget left, traffic by status and interface (synthetic apart), latency, cost against the daily budget, and Sync.
+
+![The Operations dashboard: the four SLOs, traffic and latency](screenshots/grafana-operations.png)
+
+**Quality & Evaluation:** production quality proxies, synthetic traffic drawn against the latest dev evaluation run, real traffic by cohort (release · prompt · model), and the eval history of every recorded run.
+
+![The Quality & Evaluation dashboard: synthetic panels against the latest dev run, real panels by cohort](screenshots/grafana-quality.png)
+
+**An alert in Slack:** the daily budget ran out, so the "Budget exhausted" guard fired: the rule, its guard and severity, the window's numbers and a link to the dashboard, and never a Question or an Answer.
+
+![A "Budget exhausted" alert in Slack](screenshots/slack-alert.png)
 
 ## Architecture
 
@@ -119,7 +134,52 @@ flowchart TD
     P --> A["Answer"]
 ```
 
-Every external system (OpenAI, Google Drive, Slack, the file system) sits behind a port with a fake for tests, so the Assistant and Sync are tested end to end against a real Postgres without network calls. [ARCHITECTURE.md](ARCHITECTURE.md) covers the modules, Sync, protection and measurement, storage and failure modes in depth, with the reasoning behind each choice. [CODE_SAMPLES.md](CODE_SAMPLES.md) shows the code that enforces grounding, and the tests that pin it down.
+Every external system (OpenAI, Google Drive, Slack, the file system) sits behind a port with a fake for tests, so the Assistant and Sync are tested end to end against a real Postgres without network calls.
+
+Seeing and evaluating sits beside the answering path, never on it. Two optional Compose profiles add Grafana and synthetic traffic; with both off, the stack runs as before:
+
+```mermaid
+flowchart LR
+    subgraph "Default stack"
+        APP["api, slack"]
+        SYNC["sync"]
+        PG["Postgres"]
+    end
+    subgraph "Profile: synthetic"
+        SYN["synthetic: one dev Question every 10 min"]
+    end
+    subgraph "Profile: observability"
+        GRAF["Grafana (127.0.0.1:3000)"]
+    end
+    REC["eval record (CLI)"]
+    HOOK["Slack incoming webhook"]
+
+    APP -->|"answer_events"| PG
+    SYN -->|"answer_events, marked synthetic"| PG
+    SYNC -->|"sync_cycles"| PG
+    REC -->|"eval_runs"| PG
+    GRAF -->|"grafana_reader: SELECT on text-free tables only"| PG
+    GRAF -->|"alert notifications"| HOOK
+```
+
+[ARCHITECTURE.md](ARCHITECTURE.md) covers the modules, Sync, protection and measurement, seeing and evaluating, storage and failure modes in depth, with the reasoning behind each choice. [CODE_SAMPLES.md](CODE_SAMPLES.md) shows the code that enforces grounding, the tests that pin it down, and the file the SLOs are written in.
+
+## Service-level objectives
+
+What "working" means, written down before any dashboard or alert existed. Each is measured over **28 days rolling**, on real traffic only:
+
+| SLO | Good ÷ valid | Target |
+| --- | --- | --- |
+| Availability | Answered ÷ (answered + failed + refused as too busy) | 99% |
+| Latency | Answered within 8 s ÷ answered | 95% |
+| Freshness | Minutes in which an ok Sync cycle had finished at most 5 min earlier ÷ all minutes | 99% |
+| Cost | Cost of every request ÷ answered Questions × 1,000 | at most $5.00 |
+
+The latency and cost targets are the evaluation's own (p95 ≤ 8 s, ≤ $5 per 1,000 Questions). Refusals by policy (rate limits, the kill switch, a spent budget) are neither good nor bad availability: a limit or the operator chose them. Synthetic traffic is left out of every SLO, so a demo's Questions can neither pass for real use nor hide a real outage.
+
+Every target, window and threshold is written once, in `observability/slo.toml` (excerpt in [CODE_SAMPLES.md](CODE_SAMPLES.md)). The SQL, both dashboards and every alert rule are generated from it and committed, and a test fails when any is stale. The tests run every query as Grafana's read-only role on a real Postgres, at a fixed time, and hand-made mutations of the generated SQL each failed a test.
+
+**Alerts** are multiwindow burn rates: availability or latency pages when both 1 h and 5 min burn the error budget at 14.4 times the sustainable rate (6 h and 30 min at 6 times opens a ticket), with at least 20 valid requests. Sync stale, cost over target, and guards on v1.1.0's protections (budget spent or 80% used, a rate-limit spike, answering left off) complete the set. Quality proxies have panels, not alerts: with no labels online, a threshold on them would alert on noise.
 
 ## Evaluation
 
@@ -175,6 +235,12 @@ The held-out split was run five times. Each run's misses were reproduced as new 
 
 What closed the gaps: claims that only say "the documents do not mention…" removed as unverifiable, keyword search over titles, 12 chunks instead of 8 so both sides of a conflict are shown; a hedged answer call against provider stalls (p95 back under 8 s); and a partial-answer check, which turned the last invented answers, partial answers made of neighbouring facts, into Not Found.
 
+### Evaluation history
+
+Every answers run is kept in the database, one row per run: the eight targets and how many were met, the Outcome mix and gate rate, the models and prompt versions, and no Question text. One idempotent command loads a run's summary; the history was backfilled with all five held-out runs above and the ten dev runs, and the Quality & Evaluation dashboard plots every target over time, one series per split and source, with the 5th held-out run as the reference.
+
+A **weekly, report-only evaluation** runs the dev split (3 repeats) through the real providers in CI, from a dedicated provider project capped at $5 a month (about $0.04 a run). The targets table goes into the job summary with the change since the previous run, and a missed target is a warning, never a failed build: a blocking gate would come only after these runs have measured how much the numbers vary. The first run met **8 of 8 targets**: outcome accuracy 96.1%, Excerpt verification 98.1%, p95 4.88 s, $0.561 per 1,000 Questions, freshness 120 s. Its summary, which holds no per-question rows, was loaded into the history and shows there as the CI point.
+
 **Why this model:** the default is the cheapest model that meets every target. Answering goes through a `LanguageModel` port, so another provider (or a self-hosted model) is a single-adapter extension.
 
 ## Engineering
@@ -183,9 +249,10 @@ What closed the gaps: claims that only say "the documents do not mention…" rem
 | --- | --- |
 | **Stack** | Python 3.12, FastAPI, Pydantic, Postgres 17 with pgvector and full-text search, psycopg 3, Slack Bolt (Socket Mode), Docker Compose |
 | **Design** | Three deep modules (`Assistant.ask`, `Sync.run_once`, `Gatekeeper.ask`) behind small interfaces; every external system behind a port (`typing.Protocol`) with a fake |
-| **Tests** | 1,038 tests (1,037 run; one live-API test needs a key): unit tests, adapter contract tests against recorded responses, and integration tests end to end against a real Postgres with pgvector |
+| **Tests** | 1,381 tests (1,380 run; one live-API test needs a key): unit tests, adapter contract tests against recorded responses, and integration tests end to end against a real Postgres with pgvector. 96% branch coverage of the package, reported, not gated |
 | **Quality gates** | ruff lint and format, strict mypy, the full test suite, on every push and in a pre-commit hook |
-| **CI** | Two jobs: the gates against a Postgres service, and a Docker Compose smoke test from a clean checkout with no provider keys. Every action pinned to a commit SHA |
+| **CI** | Three jobs: the gates against a Postgres service (with a coverage table in the job summary), a Docker Compose smoke test from a clean checkout with no provider keys, and an observability smoke test (Grafana healthy, every dashboard query run through its data source, every alert rule provisioned, a text table denied). A weekly report-only evaluation. Every action pinned to a commit SHA |
+| **Observability** | Four SLOs in one file; the SQL, two Grafana dashboards and the alert rules generated from it, committed and checked for staleness; multiwindow burn-rate alerts to Slack on a webhook of their own; Grafana provisioned read-only from files, on `127.0.0.1` only, behind Compose secrets; optional synthetic traffic, about $0.09 a day, kept out of every SLO |
 | **Operations** | A status page, structured JSON logs (no Question or Answer text by default), non-root containers, services that pause with a reason instead of restart-looping, and an operator runbook (start, update, back up, re-index, rotate keys) |
 | **Protection** | One Gatekeeper for the web page and Slack, in order: rate limits per person (token bucket per minute, count per day), operator controls (kill switch, daily budget from the events' cost), the provider check, a slot under the concurrency cap. A refused Question makes no model call, gets a clear message (429 or 503 with `Retry-After` where it applies) and is recorded with its reason |
 | **Measurement** | One answer event per request, written off the request's path through a bounded queue: Outcome or refusal reason, stage timings, tokens, cost as billed (hedged and abandoned calls included), prompt and model versions. A failed write never fails an Answer |
@@ -194,19 +261,19 @@ What closed the gaps: claims that only say "the documents do not mention…" rem
 
 ## Privacy
 
-Documents leave the server only as chunks sent to OpenAI for embedding and answering, through the API (no training on API data by default; answering is sent with `store: false`). The index, the files and the Sync state stay in your own Postgres. The server keeps no conversation history, and by default logs and stores no Question or Answer text. Answer events hold counts, timings and cost only, with no person and no IP address, and are deleted after 400 days; votes carry no IP address. Review text for a 👎 is off by default: when an operator turns it on, the Question and the Answer of a 👎 are kept 30 days for review, then deleted. Real documents need a paid API tier whose terms exclude training on inputs.
+Documents leave the server only as chunks sent to OpenAI for embedding and answering, through the API (no training on API data by default; answering is sent with `store: false`). The index, the files and the Sync state stay in your own Postgres. The server keeps no conversation history, and by default logs and stores no Question or Answer text. Answer events hold counts, timings and cost only, with no person and no IP address, and are deleted after 400 days; votes carry no IP address. Review text for a 👎 is off by default: when an operator turns it on, the Question and the Answer of a 👎 are kept 30 days for review, then deleted. Grafana reads through a database role with `SELECT` on the text-free tables only (answer events, votes, Sync cycles and state, eval runs, and which operator control changed when, never its value); tests and the CI smoke job check it is denied every table that holds text. Alert messages carry rule names, numbers and a link, nothing else. Real documents need a paid API tier whose terms exclude training on inputs.
 
 ## Roadmap
 
 The releases after v1.0.0, in order (✅: done):
 
 - ✅ **v1.1.0: Protect and measure.** Answer events without Question or Answer text, runtime cost per Answer, 👍/👎 feedback on Answers, rate limits for the web page and Slack, load shedding, a daily spending limit, a kill switch, and a load test.
-- **v1.2.0: See and evaluate.** Service-level objectives, Grafana dashboards and alerts, evaluation history, scheduled evaluation runs and a coverage report.
-- **v1.3.0: Company sign-in and published images.** Google sign-in for the web page and status page through an authenticating proxy, and versioned container images with an SBOM and provenance.
-- **v1.4.0: More providers, measured.** Claude and Gemini adapters, a model comparison on a new held-out set, optional provider failover, and a prompt-injection evaluation category.
-- **v1.5.0: Multi-step questions.** An optional agentic mode for questions that need several lookups, with every Answer still verified.
-- **v1.6.0: Automation.** API keys for the ask endpoint and a documented workflow automation example.
-- **v2.0.0: Permission-aware retrieval.** Each person gets Answers only from the Documents they can open in Drive.
+- ✅ **v1.2.0: See and evaluate.** Service-level objectives, Grafana dashboards and alerts, evaluation history, scheduled evaluation runs, synthetic traffic and a coverage report.
+- **v1.3.0: Ranks with a trained model.** A trained reranker.
+- **v1.4.0: Knows when it is sure.** Calibrated confidence, 👍/👎 as Slack reactions, and a prompt-injection evaluation.
+- **v1.5.0: Answers in channels on its own when sure.** Unprompted Answers in Slack channels that opt in.
+- **v1.6.0: Shows what your documents are missing.** Docs health.
+- **v2.0.0: Sign-in and permission-aware retrieval.** Company sign-in, and Answers only from the Documents each person can open.
 
 ## Code access
 

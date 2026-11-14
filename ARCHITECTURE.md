@@ -23,6 +23,11 @@ How Grounded Docs is put together, and why. The README covers what it does and h
 | **Answer event** | One row per request, answered, refused or failed: counts, timings, tokens, cost and versions, never any Question or Answer text. |
 | **Operator controls** | Values the operator changes live with the `controls` command: the kill switch (answering on or off, with a message), the daily budget (a spending limit reset at 00:00 UTC) and the rate limits. `.env` holds their defaults. |
 | **Vote / Review text** | A 👍 or 👎 on an Answer; with the opt-in setting, a 👎 also keeps that Answer's text for 30 days for a reviewer. |
+| **SLO** | A service-level objective: a ratio of good to valid events (or a cost) and its target over 28 days rolling. Four: availability, latency, freshness, cost. |
+| **Guard** | An alert on one of the protections rather than on an SLO: the budget spent or 80% used, a rate-limit spike, answering left off. |
+| **Sync cycle** | One run of Sync, recorded as a row: when, which mode, ok or failed, counts or the error's class name. |
+| **Eval run** | One answers evaluation, recorded from its summary file as a row in `eval_runs`: its targets, versions and costs. |
+| **Synthetic traffic** | Dev Questions asked on a timer by the `synthetic` service, so a demo's dashboards have data; its events are marked and kept out of every SLO. |
 
 ## Modules and ports
 
@@ -34,6 +39,7 @@ flowchart TB
         API["api: FastAPI app (page, /api/ask, /status, /healthz)"]
         SLACK["slack: Slack bot (Socket Mode)"]
         SYNCSVC["sync: SyncLoop"]
+        SYNSVC["synthetic: SyntheticTraffic (optional profile)"]
         CLI["CLI: migrate, dev, sync, reindex, eval, controls"]
     end
     subgraph "Core"
@@ -48,6 +54,7 @@ flowchart TB
         SRC["DocumentSource"]
         THREADS["SlackThreads"]
         SINK["AnswerEventSink"]
+        CYCLES["SyncCycleSink"]
     end
     subgraph "Adapters"
         OAI["OpenAI (Responses + Embeddings, plain REST)"]
@@ -57,11 +64,16 @@ flowchart TB
         SLACKAPI["Slack Web API"]
         FAKES["Fakes (tests and uv run dev)"]
         QUEUED["PostgresEventSink (bounded queue, one writer thread)"]
+        CYCLEPG["PostgresSyncCycleSink (one insert per cycle)"]
     end
     PG["Postgres 17 + pgvector"]
 
     API --> GATE
     SLACK --> GATE
+    SYNSVC --> GATE
+    SYNCSVC --> CYCLES
+    CYCLES -.-> CYCLEPG
+    CYCLEPG --> PG
     GATE --> ASSIST
     GATE --> SINK
     SLACK --> THREADS
@@ -104,13 +116,18 @@ flowchart TB
 | `controls.py`, `controls_command.py` | The operator controls: the registry and its validation, `OperatorControls` (cached reads with today's spend), the Postgres store, and the `controls` command. |
 | `rate_limits.py`, `refusals.py` | Token buckets with a daily count, per identity, in memory; the refusal wording and HTTP status shared by the web and Slack. |
 | `feedback.py`, `recent_answers.py` | Votes (`Feedback` over a `VoteStore` port and its Postgres adapter), and the API's memory of the last hour's Answers, with their text only when review text is on. |
-| `retention.py` | The nightly purge of review text, old answer events and their votes. |
+| `retention.py` | The nightly purge of review text, old answer events and their votes, and old Sync cycles. |
+| `sync_cycles.py` | `run_recorded`: runs one Sync cycle and records it; `PostgresSyncCycleSink`. |
+| `slo.py` | The SLOs and guards: `slo.toml`'s typed model, its loader, and the SQL rendered from it (SLIs, burn rates, alerts, guards). |
+| `dashboards.py`, `alerting.py` | The Operations and Quality & Evaluation dashboards, and the alert rules, contact point and notification policy, rendered as Grafana provisioning files. |
+| `grafana_reader.py` | The read-only role Grafana connects as: its grants, password and default budget, set by `migrate`. |
+| `synthetic.py` | Synthetic traffic: one dev Question per interval through a Gatekeeper of its own. |
 | `status.py` | The status report, its Protection part included (`ProtectionReport`). |
 | `clock.py` | The injectable clock, and midnight UTC for the budget and the daily limits. |
 | `loadtest.py` | The load test's fake providers, replaying recorded call times (never used by a running deployment). |
 | `providers.py`, `settings.py` | Wiring: settings from the environment, adapters from settings. The only place that picks an adapter. |
 | `api/`, `slack_bot/` | Thin interfaces over the Assistant and the status queries. |
-| `evaluation/` | The `eval` harness: retrieval, answer and Sync measurements over the demo corpus. |
+| `evaluation/` | The `eval` harness: retrieval, answer and Sync measurements over the demo corpus; `history.py` loads answers summaries into `eval_runs` (`eval record`). |
 | `migrations/` | Numbered SQL files and the `migrate` command. |
 
 ## The answer pipeline
@@ -265,6 +282,91 @@ Review text is opt-in (`REVIEW_TEXT_ON_DOWNVOTE`, off by default): it is the one
 
 On v1.1.0 (12 threads, 15 GB), no step's p95 passed 8 s (4.48 s at 1, 5.15 s at 16, 4.83 s at 32), so the stack's own work is not the limit up to 32, and the default is N = 16: one step below the first p95 over 8 s, and with none over it, 32 minus one step. A separate check with the cap lowered to 2 refused 48 of 50 Questions `overloaded` at once, each with its event. A fake Answer has one claim where real ones have several, so verification work per Question is somewhat lower than in production.
 
+## Seeing and evaluating
+
+Answer events alone are only rows. Nobody sees them, and without a stated meaning of "working" there is nothing to alert on. This layer adds the objectives, the history the objectives need, and a read-only view of it all. Nothing on the answering path changes: Grafana only reads, `sync_cycles` gets one insert per cycle, and `eval_runs` is written by a CLI command.
+
+```mermaid
+flowchart LR
+    TOML["observability/slo.toml"] --> BUILD["build.py: grounded_docs.slo, dashboards, alerting"]
+    BUILD --> GEN["generated/*.sql"]
+    BUILD --> DASH["dashboards/operations.json, quality.json"]
+    BUILD --> RULES["alerting/rules.yaml, contact point, policy"]
+    DASH --> GRAF["Grafana (profile observability)"]
+    RULES --> GRAF
+    GRAF -->|"grafana_reader"| PG["Postgres"]
+    GRAF -->|"notifications"| HOOK["Slack incoming webhook"]
+    SYNCL["SyncLoop, sync --once / --full"] -->|"sync_cycles"| PG
+    REC["eval record, eval answers --record-to"] -->|"eval_runs"| PG
+    SYN["synthetic service"] -->|"answer_events, interface synthetic"| PG
+```
+
+### SLOs, written once
+
+Four objectives over 28 days rolling, on non-synthetic events:
+
+| SLO | Good ÷ valid | Target |
+| --- | --- | --- |
+| Availability | `answered` ÷ (`answered` + `failed` + `refused` `overloaded`) | 99% |
+| Latency | `answered` with `duration_ms ≤ 8000` ÷ `answered` | 95% |
+| Freshness | fresh minutes ÷ minutes | 99% |
+| Cost | cost of every request ÷ priced `answered` × 1,000 | ≤ $5.00 |
+
+Refusals by policy (`rate_limited`, `answering_off`, `budget_exhausted`) are excluded from availability: a limit or the operator chose them. `overloaded` is bad: the server could not take the Question. A minute is **fresh** when an ok Sync cycle finished at most 5 minutes before it, so a paused `sync` (which writes no cycles) and failed cycles are stale. That is what a person sees. NULL costs (an unpriced model) are left out of both sides of the cost ratio and counted separately.
+
+**Why one file, generated:** every target appears in four places (the README, its panel, two alert windows), and hand-copied numbers drift. `observability/slo.toml` holds every target, window, threshold and severity, typed by `grounded_docs.slo` (Pydantic: durations, shares and SQL conditions validated). `observability/build.py` renders the SQL into `observability/generated/*.sql`, then both dashboards and the alert rules, which embed that SQL as it is. All the output is committed, and a test fails when any of it is stale. The SQL tests load the generated files, never a copy, and run them as `grafana_reader` on real Postgres at a fixed `now`. Burn math is `numeric`, so 14.4× and 6× hold exactly at the boundary. Intervals are rendered in hours and minutes, never days, because a `timestamptz` day depends on the session's time zone.
+
+**Why multiwindow burn rates:** a threshold on the raw error rate either pages on one bad minute or misses a slow leak. A fast pair (1 h and 5 min, both at or over 14.4× the budget rate) catches an outage within minutes, and the short window ends the alert soon after the outage ends. A slow pair (6 h and 30 min at 6×) catches a leak. Each needs at least 20 valid events in its long window, because one failure among three Questions at night is not an outage. Below that count, the query returns no row, which Grafana reads as OK.
+
+### Sync cycles
+
+`sync_cycles` (migration 0010) gets one row per cycle: started, finished, mode as it ran, `ok`, and either the five counts or the exception's class name. It never stores the message, which can name hosts, users or Documents. `sync_cycles.run_recorded` is the one place the rule lives: `SyncLoop` and `sync --once` / `--full` all run their cycle through it. It returns the report or re-raises, so the cycle's result never depends on the sink. `PostgresSyncCycleSink` inserts each row on a connection of its own (2 s timeouts): at one row every two minutes, a queue would add nothing. A failed insert is logged by error type, and that minute may read as stale, which errs toward alerting. A class name the table's pattern refuses (Python allows non-ASCII ones) is recorded as `UnnamedError`. A paused loop records nothing. The nightly purge deletes cycles older than `EVENT_RETENTION_DAYS`, in the events' transaction.
+
+### Eval runs
+
+`eval_runs` (migration 0011) keeps one row per answers run, keyed by the summary file's name: split, start, commit, models, prompt versions, repeats, each target's value (invented and accuracy with their spread), targets met, judge and indexing cost, the Outcome mix, the gate rate, and the summary as `jsonb`, with its per-question rows removed (no Question text; a test checks every dev and held-out Question against the stored rows). `source` is `harness`, `ci` or `readme`.
+
+`evaluation/history.py` reads a summary leniently (the oldest lack later fields), rejects anything that is not an answers summary with a reason naming fields, never values, and inserts with `ON CONFLICT (run_key) DO NOTHING`, all rows in one transaction. `eval record` is therefore idempotent: a second run reports every file as present. Commits renamed by a history rewrite are recorded under their current names from a committed map. Older runs get their gate rate from the `llm_called` flags of the `-raw.json` file beside them, and nothing else is read from that file. The one held-out run whose JSON was lost is one row typed from the README's table (`--readme-run`, `summary` NULL).
+
+**Why in the production database:** that is where Grafana reads, so quality over time sits beside production's proxies, with one data source. The evaluation's own database is a throwaway.
+
+### The reader role
+
+Grafana's SQL editor runs any query its data source allows, for anyone who can edit a dashboard, and the database also holds every Document's text and opt-in review text. So Grafana connects as `grafana_reader`, which `migrate` creates or updates whenever `GRAFANA_DB_PASSWORD` is set, under the migration lock, in one transaction. It revokes every grant on the schema's tables and sequences, then grants `SELECT` on exactly `answer_events`, `answer_votes`, `sync_cycles`, `sync_state`, `eval_runs`, and five columns of `operator_control_changes`. It sets a 10 s statement timeout, and keeps `DAILY_BUDGET_USD` as a role setting (`grounded_docs.default_budget_usd`), because dashboard JSON takes no environment variables and Grafana cannot read the app's `.env`.
+
+- **Column grants, not views:** `operator_control_changes`' `old_value` / `new_value` can hold the kill switch's message, free text. Two guards need a value from them, so migration 0012 adds generated, typed columns (`budget_usd numeric`, `answering_off boolean`) that are granted instead. The writers are unchanged, and no text column is readable.
+- **The password is never sent:** `ALTER ROLE` takes no bind parameters, so `migrate` computes the SCRAM-SHA-256 verifier client-side and sends that as a quoted literal. The plaintext never reaches the server or its statement log.
+- **Kept honest by tests:** the role reads each granted table and is denied every table with text. A granted column that could hold text outside an explicit per-table list of identifiers fails a schema test.
+
+### Grafana and its dashboards
+
+Grafana OSS (`grafana/grafana` 13.2.4, pinned by digest) runs in the Compose profile `observability`, on `127.0.0.1:3000` only, with anonymous access, sign-up, analytics and update checks off. Everything comes from read-only provisioning files: the data source, both dashboards, the alert rules, the contact point and the policy. Its own state is a named volume.
+
+- **The passwords are env-sourced Compose secrets.** A `${VAR:?}` would break the default stack, which Compose interpolates with every profile. A secret's variable is read only when its service starts: unset, Compose refuses to start `grafana`; empty, no file is mounted and `observability/grafana/entrypoint.sh` refuses, since Grafana would otherwise fall back to admin/admin. Neither shows in `docker inspect`.
+- **SLO panels ignore the time picker.** Each embeds its generated query with `%(now)s` replaced by `$__timeTo()`, and overrides the panel's range with the SLO window (28 days), so the number is always the objective's. The other panels follow the picker through Grafana's macros.
+- **Synthetic apart.** Every traffic and quality panel has a synthetic twin. On Quality & Evaluation, the synthetic Outcome mix, gate rate and p95 are drawn against the latest dev `eval_runs` row as dashed series read in SQL (p95 shaded from that run's fastest to slowest repeat), and a table names that run. No baseline number is written in the JSON. Real traffic gets cohorts (release · prompt · model) and no band, because its mix is not the evaluation set's. There are no dashboard variables, so a viewer's selection can never change what a panel means.
+- **Proxies, never accuracy.** Production has no labels. Accuracy stays an offline evaluation number, plotted in the eval-history panels beside the 5th held-out run, named by its `run_key`.
+
+### Alert rules and notifications
+
+`grounded_docs.alerting` renders one rule per SLO burn pair, Sync stale, cost over target, and the four guards, evaluated every minute. A rule's query returns `firing` (0 or 1) and the window's numbers, or no row. No row is OK for every rule except Sync stale, whose query always returns one, because no cycles at all is the outage. Synthetic events are excluded except from the two budget guards. Labels carry the severity (`page` or `ticket`) and the SLO or guard. One template formats every message: the alert, its severity, its SLO or guard, the numbers, and a link to the Operations dashboard (each rule is also tied to its panel there). There are no rules on quality proxies: with no labels online, a threshold would alert on noise.
+
+Notifications go to a Slack incoming webhook of their own (`GRAFANA_SLACK_WEBHOOK_URL`), not the bot's token, so alerts still arrive when the bot is paused or broken, and the bot's scopes stay unchanged. With the variable empty, the entrypoint provisions a copy of the folder without the contact point and the policy, plus a file that deletes any an earlier start provisioned. The rules still evaluate and show in Grafana, and nothing is sent. The 80% budget guard has a route of its own that repeats once a day.
+
+**Alerts exist only while Grafana runs.** There is no second evaluator. This is accepted for a one-server deployment and documented.
+
+### Synthetic traffic
+
+`SyntheticTraffic` asks the dev split's Questions in turn (`synthetic/questions.json`, typed `LoadtestQuestion`s from the load test's generator, follow-ups with their turns), one per `SYNTHETIC_INTERVAL_SECONDS`, measured from the start of the last. It asks in-process, through a Gatekeeper of its own: `Versions.synthetic=True`, `Caller(interface="synthetic", identities=())` (no identity, so no rate limit), `max_in_flight=1`. The real providers, the operator controls, the budget and the timeout apply as for any Question, so it costs money and counts toward the budget. Migration 0013 widens `answer_events.interface` to accept `synthetic`, so its events are told apart by interface as well as by the `synthetic` flag.
+
+**Why in-process, not over HTTP:** an HTTP client would need a way to mark itself synthetic, a token, and so an authentication surface before sign-in exists. **Why its own profile:** turning the dashboards on must never spend money. The service runs `migrate` first, and stays up, paused, logging why, without a provider key, with a missing or invalid Questions file, on an embedding model mismatch, or with a budget set and an unpriced model. Its logger is named `grounded_docs.synthetic`, because `python -m` runs the module as `__main__`.
+
+### Evaluation in CI
+
+`.github/workflows/eval.yml` runs `eval answers --split dev --repeats 3` with the real providers on Mondays at 06:00 UTC and on `workflow_dispatch`, on `master` only. It runs against a Postgres service container, indexing the corpus each run, with a key from a dedicated OpenAI project capped at $5 a month (`OPENAI_API_KEY_EVAL`). It is **report-only**. `eval/ci_summary.py render` writes the targets table and the change since the previous run into the job summary, with one warning annotation per missed target, and never fails. The job fails only if the run crashes. A missing secret ends it with a notice and success. The previous run is found by listing the unexpired `eval-summary` artifacts from `master`, not by listing workflow runs: a run without the key succeeds with no artifact. `eval/ci_summary.py artifact` uploads the summary without its per-question rows (90 days), checked to load as `eval record --source ci` loads it. Production is unreachable from CI, so the operator downloads it and records it by hand.
+
+**Why report-only:** a blocking gate needs margins, and margins need the run-to-run variance that these runs are there to measure.
+
 ## Storage
 
 One Postgres database holds the whole Index.
@@ -278,17 +380,30 @@ One Postgres database holds the whole Index.
 | `unreadable_documents` | Documents that could not be read, the reason and the version seen. |
 | `sync_failures` | Documents whose last attempt failed, with the entry to retry from. |
 | `sync_state` | The Source's change cursor and the last successful incremental and full Sync times. |
-| `answer_events` | One row per request (migration 0006): status, reason, Outcome, counts, stage timings, tokens, cost, versions, `synthetic`, the Slack workspace id. No Question or Answer text. |
-| `operator_controls`, `operator_control_changes` | The controls changed with `controls`, and every change (0007). |
+| `answer_events` | One row per request (migration 0006): status, reason, Outcome, counts, stage timings, tokens, cost, versions, `synthetic`, the interface (`web`, `slack` or, since 0013, `synthetic`), the Slack workspace id. No Question or Answer text. |
+| `operator_controls`, `operator_control_changes` | The controls changed with `controls`, and every change (0007); each change's typed `budget_usd` and `answering_off`, generated from its value (0012). |
 | `answer_votes` | Votes, append-only (0008). |
 | `review_texts` | Review text for 👎 Answers, opt-in, deleted after 30 days (0009). |
+| `sync_cycles` | One row per Sync cycle: times, mode, ok, counts or the error's class name; no Document names or ids (0010). |
+| `eval_runs` | One row per recorded answers evaluation: targets, versions, costs, the summary without per-question rows (0011). |
 | `schema_migrations` | Applied migrations. |
+
+Grafana reads only `answer_events`, `answer_votes`, `sync_cycles`, `sync_state`, `eval_runs` and five columns of `operator_control_changes`, through `grafana_reader` (above).
 
 Migrations are numbered SQL files, each applied in its own transaction under an advisory lock, so `api` and `sync` can start together. Every connection sets a statement timeout. No Question or Answer text is stored unless review text is turned on, and then only for 👎 Answers: the server keeps no conversation, and logs carry text only when `LOG_QUESTIONS=true`.
 
 ## Deployment
 
 One image runs four Docker Compose services: `api` (web page, HTTP API, status page), `sync` (the Sync loop), `slack` (the Slack bot, over Socket Mode, so nothing is exposed to the internet) and `postgres`. Services run as a non-root user. A service that cannot work (no API key, no Slack tokens, an embedding model mismatch) stays up and paused, logging why, instead of restart-looping; `api` never waits for `sync` or `slack`.
+
+Two optional Compose profiles add one service each, and the default stack's services are identical with or without them (a test compares `docker compose config` with the file from before the profiles existed):
+
+| Profile | Service | What it adds |
+| --- | --- | --- |
+| `observability` | `grafana` | Grafana on `127.0.0.1:3000`, provisioned read-only from `observability/grafana/`; refuses to start without both passwords. |
+| `synthetic` | `synthetic` | The same image, running `migrate`, then `python -m grounded_docs.synthetic serve`; `synthetic/questions.json` is bind-mounted read-only, because the image holds only `src/`. |
+
+`api` and `sync` both run `migrate` at start (it takes an advisory lock), so the reader role follows `GRAFANA_DB_PASSWORD` whichever starts first.
 
 ## Failure modes
 
@@ -316,7 +431,20 @@ The rule throughout: **never a fallback Answer.** A failure is reported as a fai
 | No API key configured | The stack starts; `/api/ask` answers 503 (a `failed` event); `sync` and `slack` pause (so nothing is purged); the status page says why. |
 | A Document fails to sync | Its previous version stays searchable; listed on the status page with the error; retried every cycle. |
 | A Document cannot be read | Listed as Unreadable with its reason; named in Answers it might have answered. |
-| Sync cycle fails | Logged; the next cycle runs on schedule; a failed full reconciliation is retried an hour later. |
+| Sync cycle fails | Logged and recorded in `sync_cycles` with its class name; the next cycle runs on schedule; a failed full reconciliation is retried an hour later. |
+| `sync_cycles` insert fails | Logged by type; the cycle's result is unaffected; that minute may read as stale (errs toward alerting). |
+| Grafana down, or the profile off | Nothing on the answering path changes; alerts are not evaluated. |
+| Slack webhook unset or failing | The rules evaluate and show in Grafana; Grafana logs the delivery error. |
+| A Grafana password unset or empty | Unset: Compose refuses to start `grafana`; empty: its entrypoint refuses. Without `GRAFANA_DB_PASSWORD`, `migrate` creates no role. |
+| A dashboard editor queries a text table | Permission denied: `grafana_reader` has no grant on it. |
+| Low traffic | Burn and spike rules need their minimum counts; below them, no data, which is OK (except Sync stale). |
+| `eval record` on a bad or non-answers file | Rejected with a reason naming fields, never values; the other files are still recorded; exit code 1. |
+| `eval record` twice | Every file reported present; nothing duplicated. |
+| CI evaluation: secret missing | A notice; the job succeeds and uploads nothing. |
+| CI evaluation: targets missed | Warning annotations; the job succeeds. |
+| CI evaluation: provider failure or crash | The job fails (its only failure); no artifact. |
+| Synthetic traffic refused (budget, kill switch) | Refused like any Question, its event written, logged by kind and request id; it asks again at the next interval. |
+| Synthetic traffic without a key or a valid Questions file | Up and paused, logging why. |
 
 Provider adapters log operations, statuses, attempts and token counts: never prompts, Document text, model output or provider error messages, which can quote the API key.
 
@@ -324,10 +452,11 @@ Provider adapters log operations, statuses, attempts and token counts: never pro
 
 | Layer | Location | What it covers |
 | --- | --- | --- |
-| Unit | `tests/unit/` | Parsing, chunking, contracts, settings, prompts, hedging (on a scripted timeline), the Slack bot (fake Slack), the status API, the Sync loop (fake clock), evaluation scoring. Adapter contract tests run against recorded OpenAI responses and a fake Drive. Protection, with fakes and a fake clock: the Gatekeeper (`test_gatekeeper.py`: each refusal with its event and no model call, a slow fake holding every slot, the 504 that keeps its slot, two concurrent requests' usage), usage per request (`test_usage.py`), event builders and the queued sink (`test_answer_event_builder.py`, `test_answer_events.py`), the controls' cache and fallback (`test_operator_controls.py`), rate limits (`test_rate_limits.py`), trusted proxies through uvicorn's own config (`test_api_serve.py`), refusals through the API and Slack (`test_ask_failures.py`, `test_slack_bot.py`), votes (`test_feedback.py`, `test_feedback_api.py`, `test_recent_answers.py`), the Protection section (`test_status_api.py`, `test_protection_status.py`), and the load test's fakes and Questions (`test_loadtest_latency.py`, `test_loadtest_questions.py`). |
-| Integration | `tests/integration/` | The Assistant and Sync end to end against a real Postgres with pgvector (a testcontainers container locally, a service container in CI), with fake providers: grounding and downgrades, hybrid search, follow-ups, Sync changes and failures, migrations, query timeouts, the HTTP API. Protection on real Postgres: events read back field by field with the no-text schema test and `CHECK`s (`test_answer_events.py`), one event per Answer from both interfaces under the logged id (`test_gatekeeper_events.py`), the `controls` command and both Gatekeepers seeing a change (`test_operator_controls.py`), votes (`test_feedback.py`), review text (`test_review_texts.py`), the purge (`test_retention.py`), refusal counts (`test_status.py`), and the load-test app (`test_loadtest.py`). |
+| Unit | `tests/unit/` | Parsing, chunking, contracts, settings, prompts, hedging (on a scripted timeline), the Slack bot (fake Slack), the status API, the Sync loop (fake clock), evaluation scoring. Adapter contract tests run against recorded OpenAI responses and a fake Drive. Protection, with fakes and a fake clock: the Gatekeeper (`test_gatekeeper.py`: each refusal with its event and no model call, a slow fake holding every slot, the 504 that keeps its slot, two concurrent requests' usage), usage per request (`test_usage.py`), event builders and the queued sink (`test_answer_event_builder.py`, `test_answer_events.py`), the controls' cache and fallback (`test_operator_controls.py`), rate limits (`test_rate_limits.py`), trusted proxies through uvicorn's own config (`test_api_serve.py`), refusals through the API and Slack (`test_ask_failures.py`, `test_slack_bot.py`), votes (`test_feedback.py`, `test_feedback_api.py`, `test_recent_answers.py`), the Protection section (`test_status_api.py`, `test_protection_status.py`), and the load test's fakes and Questions (`test_loadtest_latency.py`, `test_loadtest_questions.py`). Seeing and evaluating: `slo.toml`'s model and the stale-file test on the generated SQL (`test_slo.py`), both dashboards and the alert provisioning rendered and committed as rendered (`test_dashboards.py`, `test_quality_dashboard.py`, `test_alerting.py`), the webhook switch in the entrypoint (`test_alerting_entrypoint.py`), both profiles' Compose shape (`test_compose_observability.py`, `test_compose_synthetic.py`), `run_recorded` (`test_sync_cycles.py`), summaries to `eval_runs` records on real summaries (`test_eval_history.py`), the CI summary and artifact (`test_ci_summary.py`), and synthetic traffic with a fake Gatekeeper and clock (`test_synthetic.py`). |
+| Integration | `tests/integration/` | The Assistant and Sync end to end against a real Postgres with pgvector (a testcontainers container locally, a service container in CI), with fake providers: grounding and downgrades, hybrid search, follow-ups, Sync changes and failures, migrations, query timeouts, the HTTP API. Protection on real Postgres: events read back field by field with the no-text schema test and `CHECK`s (`test_answer_events.py`), one event per Answer from both interfaces under the logged id (`test_gatekeeper_events.py`), the `controls` command and both Gatekeepers seeing a change (`test_operator_controls.py`), votes (`test_feedback.py`), review text (`test_review_texts.py`), the purge (`test_retention.py`), refusal counts (`test_status.py`), and the load-test app (`test_loadtest.py`). Seeing and evaluating on real Postgres: every SLI, burn-rate and guard query loaded from the generated files at a fixed time (`test_slo_queries.py`), every dashboard and alert query read from the committed JSON and YAML and run as `grafana_reader`, with values asserted (`test_operations_dashboard.py`, `test_quality_dashboard.py`, `test_alerting_queries.py`), the role's grants and denials (`test_grafana_reader.py`), Sync cycles and their purge (`test_sync_cycles.py`, `test_retention.py`), `eval record` (`test_eval_history.py`), synthetic events through its Gatekeeper (`test_synthetic_traffic.py`, `test_synthetic_interface.py`), and, with Docker, the default stack unchanged by the profiles and Grafana refusing to start without its password (`test_compose_observability.py`). |
 | Live | `tests/live/` | A few calls to the real OpenAI API; skipped unless a key is set, never run in CI. |
-| Evaluation | `uv run eval` | Not a test: 99 questions over the demo corpus with the real providers, split into dev (for tuning) and held-out (for reporting). Results are in the README. |
+| Evaluation | `uv run eval` | Not a test: 99 questions over the demo corpus with the real providers, split into dev (for tuning) and held-out (for reporting). Results are in the README; the dev split also runs weekly in CI, report-only. |
+| Observability smoke | `observability/smoke.sh` | Against a running stack with the profile: Grafana healthy, both dashboards listed, every dashboard query run through the provisioned data source, every alert rule provisioned and evaluating, a query on `review_texts` denied. |
 | Load test | `loadtest/ask.js` | Not in CI: a script and a documented run over fake providers (above). |
 
-CI runs two jobs on every push: lint, format check, strict mypy and the full test suite against a Postgres service; and a Compose smoke test that builds the image, starts the stack from a clean checkout with no provider keys, and checks `/healthz`, `/api/status` and that every service stays running.
+CI runs three jobs on every push. The first runs lint, format check, strict mypy and the full test suite against a Postgres service, with branch coverage as a table in the job summary (report-only: no threshold, no badge). The second, a Compose smoke test, builds the image, starts the stack from a clean checkout with no provider keys, and checks `/healthz`, `/api/status` and that every service stays running. The third, an observability smoke test, checks that Grafana refuses to start without its admin password, then starts the profile with throwaway passwords and runs `observability/smoke.sh`. A second workflow, `eval.yml`, runs the weekly evaluation (above).
