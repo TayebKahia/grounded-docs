@@ -23,6 +23,12 @@ https://github.com/user-attachments/assets/af913147-21be-4877-83a1-0e5653baf82a
 
 The kill switch, a daily-budget refusal, a 👎 that keeps its review text, the answer event behind every request, and the status page's Protection section.
 
+### v1.2.0: seen and evaluated (2 min)
+
+https://github.com/user-attachments/assets/8d2805ee-2229-43f4-86d7-97b9d33d5db7
+
+Four SLOs on the Operations dashboard, a budget cut on purpose and its alert in Slack, then resolved; eval history with the weekly CI run at 8 of 8, and synthetic traffic checked against the last evaluation.
+
 ## What it does
 
 - **Three honest Outcomes.** *Answered* (every claim cited), *Partially Answered* (the parts the documents don't cover are listed), or *Not Found* (with the closest documents to look in).
