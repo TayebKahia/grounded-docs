@@ -39,9 +39,9 @@ Four SLOs on the Operations dashboard, a budget cut on purpose and its alert in 
 - **Web page and Slack.** Mention the bot in a channel or send it a direct message; it answers in a thread with the same Citations. Follow-ups work in the thread.
 - **Follow-ups without server-side history.** The Session lives in the browser tab or the Slack thread. The server stores no conversation.
 - **Exact codes and IDs.** Searching for `LQA-MSA-2025-014` finds that contract, not its sibling `LQA-MSA-2025-031`. Hybrid search fuses keyword and vector ranking, and every code is indexed as one whole term.
-- **Protected and measured in production.** Every Question passes one Gatekeeper: rate limits per person, a kill switch, a daily spending limit and a cap on Questions in flight, all changed live with one command and no restart. Every request is recorded as an answer event (timings, tokens, cost, versions; never any Question or Answer text), and people rate Answers with 👍/👎.
+- **Protected and measured.** Every Question passes one Gatekeeper: rate limits per person, a kill switch, a daily spending limit and a cap on Questions in flight, all changed live with one command and no restart. Every request is recorded as an answer event (timings, tokens, cost, versions; never any Question or Answer text), and people rate Answers with 👍/👎.
 - **Seen and evaluated.** Four service-level objectives (availability, latency, freshness, cost), written down once and turned into two Grafana dashboards and burn-rate alerts that reach Slack. Every evaluation run is kept in the database and plotted over time, a report-only evaluation runs weekly in CI, and optional synthetic traffic keeps a quiet deployment's dashboards from going blank. Grafana reads through a database role that cannot see any Question, Answer or Document text.
-- **Cheap to run.** $0.62 per 1,000 Questions on the measured held-out set, on one small server with Docker Compose.
+- **Cheap to run.** $0.62 per 1,000 Questions with `gpt-6-luna` and `text-embedding-3-small` on the measured held-out set, on one small server with Docker Compose.
 
 ## Screenshots
 
@@ -72,7 +72,7 @@ Four SLOs on the Operations dashboard, a budget cut on purpose and its alert in 
 
 ![The Operations dashboard: the four SLOs, traffic and latency](screenshots/grafana-operations.png)
 
-**Quality & Evaluation:** production quality proxies, synthetic traffic drawn against the latest dev evaluation run, real traffic by cohort (release · prompt · model), and the eval history of every recorded run.
+**Quality & Evaluation:** quality proxies for unlabelled traffic, synthetic traffic drawn against the latest dev evaluation run, real traffic by cohort (release · prompt · model), and the eval history of every recorded run.
 
 ![The Quality & Evaluation dashboard: synthetic panels against the latest dev run, real panels by cohort](screenshots/grafana-quality.png)
 
@@ -239,7 +239,7 @@ The held-out split was run five times. Each run's misses were reproduced as new 
 | p95 ≤ 8 s | 7.96 s | 5.34 s | ❌ 9.84 s | 6.21 s | 5.77 s |
 | Cost ≤ $5 / 1,000 | $0.383 | $0.577 | $0.579 | $0.741 | $0.615 |
 
-What closed the gaps: claims that only say "the documents do not mention…" removed as unverifiable, keyword search over titles, 12 chunks instead of 8 so both sides of a conflict are shown; a hedged answer call against provider stalls (p95 back under 8 s); and a partial-answer check, which turned the last invented answers, partial answers made of neighbouring facts, into Not Found.
+What closed the gaps: claims that only say "the documents do not mention…" removed as unverifiable, keyword search over titles, 12 chunks instead of 8 so both sides of a conflict are shown; a hedged answer call against provider stalls; and a partial-answer check, which turned the last invented answers, partial answers made of neighbouring facts, into Not Found.
 
 ### Evaluation history
 
