@@ -185,13 +185,13 @@ The latency and cost targets are the evaluation's own (p95 ≤ 8 s, ≤ $5 per 1
 
 Every target, window and threshold is written once, in `observability/slo.toml` (excerpt in [CODE_SAMPLES.md](CODE_SAMPLES.md)). The SQL, both dashboards and every alert rule are generated from it and committed, and a test fails when any is stale. The tests run every query as Grafana's read-only role on a real Postgres, at a fixed time, and hand-made mutations of the generated SQL each failed a test.
 
-**Alerts** are multiwindow burn rates: availability or latency pages when both 1 h and 5 min burn the error budget at 14.4 times the sustainable rate (6 h and 30 min at 6 times opens a ticket), with at least 20 valid requests. Sync stale, cost over target, and guards on v1.1.0's protections (budget spent or 80% used, a rate-limit spike, answering left off) complete the set. Quality proxies have panels, not alerts: with no labels online, a threshold on them would alert on noise.
+**Alerts** are multiwindow burn rates: availability or latency pages when both 1 h and 5 min burn the error budget at 14.4 times the sustainable rate (6 h and 30 min at 6 times opens a ticket), with at least 20 valid requests. Sync stale, cost over target, and guards on v1.1.0's protections (budget spent or 80% used, a rate-limit spike, answering left off) complete the set of ten rules. Quality proxies have panels, not alerts: with no labels online, a threshold on them would alert on noise.
 
 ## Evaluation
 
 Quality is measured, not claimed. The evaluation set is 99 questions over a demo corpus of 48 fictional PDF and DOCX files from a fictional consulting firm (policies, contracts, statements of work, rate cards, reports), seeded with near-duplicate versions, conflicts, exact codes, a password-protected PDF and a scanned one. 43 **dev** questions were used for every tuning decision, and 56 **held-out** questions were run only to report numbers. Each question has an expected Outcome, expected documents and key facts, and its category: answered, ID lookup, partial, two kinds of not found (a missing fact, an absent topic), conflict, follow-up, and sync (a scripted edit or removal, then a Sync, then the Question).
 
-Every run is 3 repeats. Key facts are judged by an LLM with a fixed, versioned judge prompt, and about 10% of judgments are hand-checked. Latency is wall-clock through the real Assistant and OpenAI. Cost is from measured token usage at list prices, counted cold (no cache discount), hedged calls included.
+Every run is 3 repeats. Key facts are judged by an LLM with a fixed, versioned judge prompt, and about 10% of judgments are hand-checked. Latency is wall-clock through the real Assistant and OpenAI, with Questions asked one at a time. Cost is from measured token usage at list prices, counted cold (no cache discount), hedged calls included.
 
 ### Held-out results (final run, default model)
 
